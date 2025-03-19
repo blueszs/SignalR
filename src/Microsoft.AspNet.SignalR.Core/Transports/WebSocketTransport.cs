@@ -1,5 +1,7 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+
+#if NET45 || NETSTANDARD1_3 || NETSTANDARD2_0
 
 using System;
 using System.Collections.Generic;
@@ -96,17 +98,13 @@ namespace Microsoft.AspNet.SignalR.Transports
         {
             if (IsAbortRequest)
             {
+                Context.Response.ContentType = "text/plain";
                 return connection.Abort(ConnectionId);
             }
             else
             {
                 return AcceptWebSocketRequest(socket =>
                 {
-                    _socket = socket;
-                    socket.OnClose = _closed;
-                    socket.OnMessage = _message;
-                    socket.OnError = _error;
-
                     return ProcessRequestCore(connection);
                 });
             }
@@ -148,7 +146,14 @@ namespace Microsoft.AspNet.SignalR.Transports
                 return _context.Response.End(Resources.Error_NotWebSocketRequest);
             }
 
-            var handler = new OwinWebSocketHandler(callback, _maxIncomingMessageSize);
+            Action<IWebSocket> prepareWebSocket = socket => {
+                _socket = socket;
+                socket.OnClose = _closed;
+                socket.OnMessage = _message;
+                socket.OnError = _error;
+            };
+
+            var handler = new OwinWebSocketHandler(callback, prepareWebSocket, _maxIncomingMessageSize);
             accept(null, handler.ProcessRequest);
             return TaskAsyncHelper.Empty;
         }
@@ -166,6 +171,8 @@ namespace Microsoft.AspNet.SignalR.Transports
                     writer.Flush();
 
                     await socket.Send(writer.Buffer).PreserveCulture();
+
+                    context.Transport.TraceOutgoingMessage(writer.Buffer);
                 }
                 catch (Exception ex)
                 {
@@ -211,3 +218,9 @@ namespace Microsoft.AspNet.SignalR.Transports
         }
     }
 }
+
+#elif NET40
+// Not required on this framework.
+#else 
+#error Unsupported target framework.
+#endif

@@ -1,4 +1,4 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
@@ -10,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Reflection;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,9 +20,6 @@ using Microsoft.AspNet.SignalR.Client.Transports;
 using Microsoft.AspNet.SignalR.Infrastructure;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-#if (NET4 || NET45)
-using System.Security.Cryptography.X509Certificates;
-#endif
 
 namespace Microsoft.AspNet.SignalR.Client
 {
@@ -33,6 +31,11 @@ namespace Microsoft.AspNet.SignalR.Client
     {
         internal static readonly TimeSpan DefaultAbortTimeout = TimeSpan.FromSeconds(30);
 
+        private static readonly Version MinimumSupportedVersion = new Version(1, 4);
+        private static readonly Version MaximumSupportedVersion = new Version(2, 1);
+        private static readonly Version MinimumSupportedNegotiateRedirectVersion = new Version(2, 0);
+        private static readonly int MaxRedirects = 100;
+
         private static Version _assemblyVersion;
 
         private IClientTransport _transport;
@@ -43,7 +46,7 @@ namespace Microsoft.AspNet.SignalR.Client
         // The amount of time the client should attempt to reconnect before stopping.
         private TimeSpan _disconnectTimeout;
 
-        // The amount of time a transport will wait (while connecting) before failing. 
+        // The amount of time a transport will wait (while connecting) before failing.
         private TimeSpan _totalTransportConnectTimeout;
 
         // Provides a way to cancel the the timeout that stops a reconnect cycle
@@ -70,7 +73,7 @@ namespace Microsoft.AspNet.SignalR.Client
 
         private Task _lastQueuedReceiveTask;
 
-        private TaskCompletionSource<object> _startTcs;
+        private DispatchingTaskCompletionSource<object> _startTcs;
 
         // Used to synchronize state changes
         private readonly object _stateLock = new object();
@@ -78,7 +81,7 @@ namespace Microsoft.AspNet.SignalR.Client
         // Used to synchronize starting and stopping specifically
         private readonly object _startLock = new object();
 
-        // Used to ensure we don't write to the Trace TextWriter from multiple threads simultaneously 
+        // Used to ensure we don't write to the Trace TextWriter from multiple threads simultaneously
         private readonly object _traceLock = new object();
 
         private DateTime _lastMessageAt;
@@ -89,9 +92,21 @@ namespace Microsoft.AspNet.SignalR.Client
         //The json serializer for the connections
         private JsonSerializer _jsonSerializer = new JsonSerializer();
 
-#if (NET4 || NET45)
         private readonly X509CertificateCollection _certCollection = new X509CertificateCollection();
-#endif
+
+        // The URL passed to the ctor. Used to reset _actualUrl during Disconnect().
+        private readonly string _userUrl;
+
+        // The URL passed to the ctor or the last RedirectUrl during negotiation.
+        // Returned by both Connection.Url and IConnection.Url.
+        private string _actualUrl;
+
+        // The query string passed to the ctor. Returned by Connection.QueryString.
+        private readonly string _userQueryString;
+
+        // The query string passed to the ctor or the query string specified by the last
+        // RedirectUrl during negotiation. Returned by IConnection.QueryString.
+        private string _actualQueryString;
 
         // Keeps track of when the last keep alive from the server was received
         // internal virtual to allow mocking
@@ -173,8 +188,10 @@ namespace Microsoft.AspNet.SignalR.Client
                 url += "/";
             }
 
-            Url = url;
-            QueryString = queryString;
+            _userUrl = url;
+            _actualUrl = url;
+            _userQueryString = queryString;
+            _actualQueryString = queryString;
             _disconnectTimeoutOperation = DisposableAction.Empty;
             _lastMessageAt = DateTime.UtcNow;
             _lastActiveAt = DateTime.UtcNow;
@@ -189,7 +206,7 @@ namespace Microsoft.AspNet.SignalR.Client
             DeadlockErrorTimeout = TimeSpan.FromSeconds(10);
 
             // Current client protocol
-            Protocol = new Version(1, 4);
+            Protocol = new Version(2, 1);
         }
 
         /// <summary>
@@ -274,7 +291,6 @@ namespace Microsoft.AspNet.SignalR.Client
             }
         }
 
-#if NET4 || NET45
         X509CertificateCollection IConnection.Certificates
         {
             get
@@ -282,7 +298,6 @@ namespace Microsoft.AspNet.SignalR.Client
                 return _certCollection;
             }
         }
-#endif
 
         public TraceLevels TraceLevel { get; set; }
 
@@ -338,17 +353,17 @@ namespace Microsoft.AspNet.SignalR.Client
         /// </summary>
         public IDictionary<string, string> Headers { get; private set; }
 
-#if !PORTABLE
         /// <summary>
         /// Gets of sets proxy information for the connection.
         /// </summary>
         public IWebProxy Proxy { get; set; }
-#endif
 
         /// <summary>
         /// Gets the url for the connection.
         /// </summary>
-        public string Url { get; private set; }
+        public string Url => _userUrl;
+
+        string IConnection.Url => _actualUrl;
 
         /// <summary>
         /// Gets or sets the last message id for the connection.
@@ -378,7 +393,9 @@ namespace Microsoft.AspNet.SignalR.Client
         /// <summary>
         /// Gets the querystring specified in the ctor.
         /// </summary>
-        public string QueryString { get; private set; }
+        public string QueryString => _userQueryString;
+
+        string IConnection.QueryString => _actualQueryString;
 
         public IClientTransport Transport
         {
@@ -456,7 +473,7 @@ namespace Microsoft.AspNet.SignalR.Client
                 }
 
                 _disconnectCts = new CancellationTokenSource();
-                _startTcs = new TaskCompletionSource<object>();
+                _startTcs = new DispatchingTaskCompletionSource<object>();
                 _receiveQueueMonitor = new TaskQueueMonitor(this, DeadlockErrorTimeout);
                 _receiveQueue = new TaskQueue(_startTcs.Task, _receiveQueueMonitor);
                 _lastQueuedReceiveTask = TaskAsyncHelper.Empty;
@@ -477,39 +494,104 @@ namespace Microsoft.AspNet.SignalR.Client
         [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "The exception is flowed back to the caller via the tcs.")]
         private Task Negotiate(IClientTransport transport)
         {
+            // Captured and used by StartNegotiation to track attempts
+            var negotiationAttempts = 0;
+
+            Task CompleteNegotiation(NegotiationResponse negotiationResponse)
+            {
+                ConnectionId = negotiationResponse.ConnectionId;
+                ConnectionToken = negotiationResponse.ConnectionToken;
+                _disconnectTimeout = TimeSpan.FromSeconds(negotiationResponse.DisconnectTimeout);
+                _totalTransportConnectTimeout = TransportConnectTimeout + TimeSpan.FromSeconds(negotiationResponse.TransportConnectTimeout);
+
+                // Default the beat interval to be 5 seconds in case keep alive is disabled.
+                var beatInterval = TimeSpan.FromSeconds(5);
+
+                // If we have a keep alive
+                if (negotiationResponse.KeepAliveTimeout != null)
+                {
+                    _keepAliveData = new KeepAliveData(TimeSpan.FromSeconds(negotiationResponse.KeepAliveTimeout.Value));
+                    _reconnectWindow = _disconnectTimeout + _keepAliveData.Timeout;
+
+                    beatInterval = _keepAliveData.CheckInterval;
+                }
+                else
+                {
+                    _reconnectWindow = _disconnectTimeout;
+                }
+
+                // do not acquire _startLock, that can deadlock with Stop which takes _startLock then waits for Start to finish
+                lock (_stateLock)
+                {
+                    if (_state != ConnectionState.Connecting)
+                    {
+                        throw new StartException(Resources.Error_ConnectionCancelled, LastError);
+                    }
+                    Monitor = new HeartbeatMonitor(this, _stateLock, beatInterval);
+                }
+
+                return StartTransport();
+            }
+
+            Task StartNegotiation()
+            {
+                return transport.Negotiate(this, _connectionData)
+                                .Then(negotiationResponse =>
+                                {
+                                    var protocolVersion = VerifyProtocolVersion(negotiationResponse.ProtocolVersion);
+
+                                    if (protocolVersion >= MinimumSupportedNegotiateRedirectVersion)
+                                    {
+                                        if (!string.IsNullOrEmpty(negotiationResponse.Error))
+                                        {
+                                            throw new StartException(string.Format(Resources.Error_ErrorFromServer, negotiationResponse.Error));
+                                        }
+                                        if (!string.IsNullOrEmpty(negotiationResponse.RedirectUrl))
+                                        {
+                                            var splitUrlAndQuery = negotiationResponse.RedirectUrl.Split(new[] { '?' }, 2);
+
+                                            // Update the URL based on the redirect response and restart the negotiation
+                                            _actualUrl = splitUrlAndQuery[0];
+
+                                            if (splitUrlAndQuery.Length == 2 && !string.IsNullOrEmpty(splitUrlAndQuery[1]))
+                                            {
+                                                // Update IConnection.QueryString with query string from only the most recent RedirectUrl.
+                                                _actualQueryString = splitUrlAndQuery[1];
+                                            }
+                                            else
+                                            {
+                                                _actualQueryString = _userQueryString;
+                                            }
+
+                                            if (!_actualUrl.EndsWith("/"))
+                                            {
+                                                _actualUrl += "/";
+                                            }
+
+                                            if (!string.IsNullOrEmpty(negotiationResponse.AccessToken))
+                                            {
+                                                // This will stomp on the current Authorization header, but that's by design.
+                                                // If the server specified a token, that is expected to overrule the token the client is currently using.
+                                                Headers["Authorization"] = $"Bearer {negotiationResponse.AccessToken}";
+                                            }
+
+                                            negotiationAttempts += 1;
+                                            if (negotiationAttempts >= MaxRedirects)
+                                            {
+                                                throw new InvalidOperationException(Resources.Error_NegotiationLimitExceeded);
+                                            }
+                                            return StartNegotiation();
+                                        }
+                                    }
+
+                                    return CompleteNegotiation(negotiationResponse);
+                                })
+                                .ContinueWithNotComplete(() => Disconnect());
+            }
+
             _connectionData = OnSending();
 
-            return transport.Negotiate(this, _connectionData)
-                            .Then(negotiationResponse =>
-                            {
-                                VerifyProtocolVersion(negotiationResponse.ProtocolVersion);
-
-                                ConnectionId = negotiationResponse.ConnectionId;
-                                ConnectionToken = negotiationResponse.ConnectionToken;
-                                _disconnectTimeout = TimeSpan.FromSeconds(negotiationResponse.DisconnectTimeout);
-                                _totalTransportConnectTimeout = TransportConnectTimeout + TimeSpan.FromSeconds(negotiationResponse.TransportConnectTimeout);
-
-                                // Default the beat interval to be 5 seconds in case keep alive is disabled.
-                                var beatInterval = TimeSpan.FromSeconds(5);
-
-                                // If we have a keep alive
-                                if (negotiationResponse.KeepAliveTimeout != null)
-                                {
-                                    _keepAliveData = new KeepAliveData(TimeSpan.FromSeconds(negotiationResponse.KeepAliveTimeout.Value));
-                                    _reconnectWindow = _disconnectTimeout + _keepAliveData.Timeout;
-
-                                    beatInterval = _keepAliveData.CheckInterval;
-                                }
-                                else
-                                {
-                                    _reconnectWindow = _disconnectTimeout;
-                                }
-
-                                Monitor = new HeartbeatMonitor(this, _stateLock, beatInterval);
-
-                                return StartTransport();
-                            })
-                            .ContinueWithNotComplete(() => Disconnect());
+            return StartNegotiation();
         }
 
         private Task StartTransport()
@@ -517,17 +599,23 @@ namespace Microsoft.AspNet.SignalR.Client
             return _transport.Start(this, _connectionData, _disconnectCts.Token)
                              .RunSynchronously(() =>
                              {
-                                 // NOTE: We have tests that rely on this state change occuring *BEFORE* the start task is complete
-                                 ChangeState(ConnectionState.Connecting, ConnectionState.Connected);
+                                 lock (_stateLock)
+                                 {
+                                     // NOTE: We have tests that rely on this state change occuring *BEFORE* the start task is complete
+                                     if (!ChangeState(ConnectionState.Connecting, ConnectionState.Connected))
+                                     {
+                                         throw new StartException(Resources.Error_ConnectionCancelled, LastError);
+                                     }
 
-                                 // Now that we're connected complete the start task that the
-                                 // receive queue is waiting on
-                                 _startTcs.SetResult(null);
+                                     // Now that we're connected complete the start task that the
+                                     // receive queue is waiting on
+                                     _startTcs.TrySetResult(null);
 
-                                 // Start the monitor to check for server activity
-                                 _lastMessageAt = DateTime.UtcNow;
-                                 _lastActiveAt = DateTime.UtcNow;
-                                 Monitor.Start();
+                                     // Start the monitor to check for server activity
+                                     _lastMessageAt = DateTime.UtcNow;
+                                     _lastActiveAt = DateTime.UtcNow;
+                                     Monitor.Start();
+                                 }
                              })
                              // Don't return until the last receive has been processed to ensure messages/state sent in OnConnected
                              // are processed prior to the Start() method task finishing
@@ -557,19 +645,21 @@ namespace Microsoft.AspNet.SignalR.Client
             return false;
         }
 
-        private void VerifyProtocolVersion(string versionString)
+        private Version VerifyProtocolVersion(string versionString)
         {
             Version version;
 
             if (String.IsNullOrEmpty(versionString) ||
                 !TryParseVersion(versionString, out version) ||
-                version != Protocol)
+                version < MinimumSupportedVersion || version > MaximumSupportedVersion)
             {
                 throw new InvalidOperationException(String.Format(CultureInfo.CurrentCulture,
                                                                   Resources.Error_IncompatibleProtocolVersion,
                                                                   Protocol,
                                                                   versionString ?? "null"));
             }
+
+            return version;
         }
 
         /// <summary>
@@ -598,7 +688,7 @@ namespace Microsoft.AspNet.SignalR.Client
         public void Stop(Exception error, TimeSpan timeout)
         {
             OnError(error);
-            Stop(timeout);            
+            Stop(timeout);
         }
 
         /// <summary>
@@ -639,9 +729,9 @@ namespace Microsoft.AspNet.SignalR.Client
                 Trace(TraceLevels.Events, "Stop");
 
                 // Dispose the heart beat monitor so we don't fire notifications when waiting to abort
-                Monitor.Dispose();
+                Monitor?.Dispose();
 
-                _transport.Abort(this, timeout, _connectionData);
+                _transport?.Abort(this, timeout, _connectionData);
 
                 Disconnect();
             }
@@ -695,11 +785,13 @@ namespace Microsoft.AspNet.SignalR.Client
                     GroupsToken = null;
                     MessageId = null;
                     _connectionData = null;
+                    _actualUrl = _userUrl;
+                    _actualQueryString = _userQueryString;
 
-#if NETFX_CORE || PORTABLE
                     // Clear the buffer
+                    // PORT: In 2.3.0 this was only present in the UWP and PCL versions.
                     _traceWriter.Flush();
-#endif
+
                     // TODO: Do we want to trigger Closed if we are connecting?
                     OnClosed();
                 }
@@ -744,7 +836,6 @@ namespace Microsoft.AspNet.SignalR.Client
             return Send(this.JsonSerializeObject(value));
         }
 
-#if (NET4 || NET45)
         /// <summary>
         /// Adds a client certificate to the request
         /// </summary>
@@ -761,7 +852,6 @@ namespace Microsoft.AspNet.SignalR.Client
                 _certCollection.Add(certificate);
             }
         }
-#endif
 
         public void Trace(TraceLevels level, string format, params object[] args)
         {
@@ -845,7 +935,7 @@ namespace Microsoft.AspNet.SignalR.Client
             // the server during negotiation.
             // If the client tries to reconnect for longer the server will likely have deleted its ConnectionId
             // topic along with the contained disconnect message.
-            _disconnectTimeoutOperation = 
+            _disconnectTimeoutOperation =
                 SetTimeout(
                     _disconnectTimeout,
                     () =>
@@ -855,10 +945,9 @@ namespace Microsoft.AspNet.SignalR.Client
                         Disconnect();
                     });
 
-#if NETFX_CORE || PORTABLE
             // Clear the buffer
+            // PORT: In 2.3.0 this was only present in the UWP and PCL versions.
             _traceWriter.Flush();
-#endif
 
             if (Reconnecting != null)
             {
@@ -892,7 +981,7 @@ namespace Microsoft.AspNet.SignalR.Client
         }
 
         /// <summary>
-        /// Sets LastMessageAt to the current time 
+        /// Sets LastMessageAt to the current time
         /// </summary>
         void IConnection.MarkLastMessage()
         {
@@ -900,7 +989,7 @@ namespace Microsoft.AspNet.SignalR.Client
         }
 
         /// <summary>
-        /// Sets LastActiveAt to the current time 
+        /// Sets LastActiveAt to the current time
         /// </summary>
         void IConnection.MarkActive()
         {
@@ -914,17 +1003,8 @@ namespace Microsoft.AspNet.SignalR.Client
         [SuppressMessage("Microsoft.Design", "CA1062:Validate arguments of public methods", MessageId = "0", Justification = "This is called by the transport layer")]
         void IConnection.PrepareRequest(IRequest request)
         {
-#if PORTABLE
-            // Cannot set user agent for Portable because SL does not support it.
-#elif NETFX_CORE
-            request.UserAgent = CreateUserAgentString("SignalR.Client.WinUAP");
-#elif WINDOWS_APP
-            request.UserAgent = CreateUserAgentString("SignalR.Client.Win8UniversalApp");
-#elif NET45
-            request.UserAgent = CreateUserAgentString("SignalR.Client.NET45");
-#else
-            request.UserAgent = CreateUserAgentString("SignalR.Client.NET4");
-#endif
+            // PORT: Previously, this string differed based on the platform the app was running on (NET4, NET45,, etc.). Now it will always be NetStadnard.
+            request.UserAgent = CreateUserAgentString("SignalR.Client.NetStandard");
             request.SetRequestHeaders(Headers);
         }
 
@@ -933,37 +1013,28 @@ namespace Microsoft.AspNet.SignalR.Client
         {
             if (_assemblyVersion == null)
             {
-#if NETFX_CORE
-                _assemblyVersion = new Version("2.2.1");
-#else
+#if NETSTANDARD
+                _assemblyVersion = new AssemblyName(typeof(Resources).GetTypeInfo().Assembly.FullName).Version;
+#elif NET40 || NET45
                 _assemblyVersion = new AssemblyName(typeof(Connection).Assembly.FullName).Version;
+#else
+#error Unsupported target framework.
 #endif
             }
 
-#if NETFX_CORE || PORTABLE
-            return String.Format(CultureInfo.InvariantCulture, "{0}/{1} ({2})", client, _assemblyVersion, "Unknown OS");
-#else
+#if NETSTANDARD1_3
+            return String.Format(CultureInfo.InvariantCulture, "{0}/{1} (Unknown OS)", client, _assemblyVersion);
+#elif NETSTANDARD2_0 || NET40 || NET45
             return String.Format(CultureInfo.InvariantCulture, "{0}/{1} ({2})", client, _assemblyVersion, Environment.OSVersion);
+#else
+#error Unsupported target framework.
 #endif
         }
 
         [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "The Version constructor can throw exceptions of many different types. Failure is indicated by returning false.")]
         private static bool TryParseVersion(string versionString, out Version version)
         {
-#if PORTABLE
-            try
-            {
-                version = new Version(versionString);
-                return true;
-            }
-            catch
-            {
-                version = null;
-                return false;
-            }
-#else
             return Version.TryParse(versionString, out version);
-#endif
         }
 
         private static string CreateQueryString(IDictionary<string, string> queryString)
@@ -987,16 +1058,12 @@ namespace Microsoft.AspNet.SignalR.Client
         /// </summary>
         private class DebugTextWriter : TextWriter
         {
-#if NETFX_CORE || PORTABLE
             private readonly StringBuilder _buffer;
-#endif
 
             public DebugTextWriter()
                 : base(CultureInfo.InvariantCulture)
             {
-#if NETFX_CORE || PORTABLE
                 _buffer = new StringBuilder();
-#endif
             }
 
             public override void WriteLine(string value)
@@ -1004,7 +1071,7 @@ namespace Microsoft.AspNet.SignalR.Client
                 Debug.WriteLine(value);
             }
 
-#if NETFX_CORE || PORTABLE
+            // PORT: This logic, and the associated _buffer field and Flush method, were only in the .NET Standard build in 2.3.0
             public override void Write(char value)
             {
                 lock (_buffer)
@@ -1019,20 +1086,17 @@ namespace Microsoft.AspNet.SignalR.Client
                     }
                 }
             }
-#endif
 
             public override Encoding Encoding
             {
                 get { return Encoding.UTF8; }
             }
 
-#if NETFX_CORE || PORTABLE
             public override void Flush()
             {
                 Debug.WriteLine(_buffer.ToString());
                 _buffer.Clear();
             }
-#endif
         }
 
         /// <summary>

@@ -1,5 +1,5 @@
 /*!
- * ASP.NET SignalR JavaScript Library v2.2.1-pre
+ * ASP.NET SignalR JavaScript Library [!VERSION!]
  * http://signalr.net/
  *
  * Copyright (c) .NET Foundation. All rights reserved.
@@ -7,7 +7,7 @@
  *
  */
 
-/// <reference path="..\..\SignalR.Client.JS\Scripts\jquery-1.6.4.js" />
+/// <reference path="..\..\SignalR.Client.JS\Scripts\jquery-1.12.4.js" />
 /// <reference path="jquery.signalR.js" />
 (function ($, window, undefined) {
     /// <param name="$" type="jQuery" />
@@ -56,7 +56,8 @@
                             continue;
                         }
 
-                        subscriptionMethod.call(hub, memberKey, makeProxyCallback(hub, memberValue));
+                        // Use the actual user-provided callback as the "identity" value for the registration.
+                        subscriptionMethod.call(hub, memberKey, makeProxyCallback(hub, memberValue), memberValue);
                     }
                 }
             }

@@ -1,18 +1,16 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
+using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Client.Http;
 using Microsoft.AspNet.SignalR.Client.Transports;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-#if (NET4 || NET45)
-using System.Security.Cryptography.X509Certificates;
-#endif
 
 namespace Microsoft.AspNet.SignalR.Client
 {
@@ -34,17 +32,13 @@ namespace Microsoft.AspNet.SignalR.Client
         IClientTransport Transport { get; }
         DateTime LastMessageAt { get; }
         DateTime LastActiveAt { get; }
-        
-#if !PORTABLE
+
         /// <summary>
         /// Gets of sets proxy information for the connection.
         /// </summary>
         IWebProxy Proxy { get; set; }
-#endif
 
-#if (NET4 || NET45)
         X509CertificateCollection Certificates { get; }
-#endif
 
         bool ChangeState(ConnectionState oldState, ConnectionState newState);
 

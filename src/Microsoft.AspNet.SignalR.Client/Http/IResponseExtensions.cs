@@ -1,10 +1,11 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Client.Transports;
+using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Client.Http
 {
@@ -20,7 +21,7 @@ namespace Microsoft.AspNet.SignalR.Client.Http
             var stream = response.GetStream();
             var reader = new AsyncStreamReader(stream);
             var result = new StringBuilder();
-            var resultTcs = new TaskCompletionSource<string>();
+            var resultTcs = new DispatchingTaskCompletionSource<string>();
 
             reader.Data = buffer =>
             {
@@ -33,7 +34,7 @@ namespace Microsoft.AspNet.SignalR.Client.Http
             reader.Closed = exception =>
             {
                 response.Dispose();
-                resultTcs.SetResult(result.ToString());
+                resultTcs.TrySetResult(result.ToString());
             };
 
             reader.Start();

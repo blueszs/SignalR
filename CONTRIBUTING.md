@@ -1,8 +1,6 @@
 ## Filing issues
 
 The github issue list is for bugs, not discussions. If you have a question you want to ask you have many alternatives:
-- [The SignalR forum](http://forums.asp.net/1254.aspx/1?ASP+NET+SignalR)
-- [The JabbR chat room](https://jabbr.net/#/rooms/signalr)
 - [Stackoverflow](http://stackoverflow.com/questions/tagged/signalr)
 
 When filing issues, please use our [bug filing templates](https://gist.github.com/signalrcoreteam/5317001). The best way to get your bug fixed is to be as detailed as you can be about the problem.
@@ -30,9 +28,9 @@ We follow the [ASP.NET webstack coding guidelines](http://aspnetwebstack.codeple
 ### Project Workflow
 
 Our workflow is loosely based on [Github Flow](http://scottchacon.com/2011/08/31/github-flow.html). We actively develop in the **dev** branch. This means that all pull requests by contributors need to be developed and submitted to the dev branch.
-The master branch always matches the current release on [nuget.org](http://nuget.org/packages/Microsoft.AspNet.SignalR/) and we also [tag](https://github.com/SignalR/SignalR/tags) each release.
+The main branch always matches the current release on [nuget.org](http://nuget.org/packages/Microsoft.AspNet.SignalR/) and we also [tag](https://github.com/SignalR/SignalR/tags) each release.
 When the end of a milestone is coming up, we create a branch called **release** to stabilize the build for the upcoming release.
-The release is then merged into master and deleted and the cycle continues until the end of the next milestone.
+The release is then merged into main and deleted and the cycle continues until the end of the next milestone.
 
 ### Issue management
 
@@ -52,7 +50,7 @@ The release is then merged into master and deleted and the cycle continues until
 
 ### Submitting Pull requests
 
-You will need to sign a [Contributor License Agreement](https://cla.dotnetfoundation.org) before submitting your pull request. To complete the Contributor License Agreement (CLA), you will need to submit a request via the form and then electronically sign the Contributor License Agreement when you receive the email containing the link to the document. This needs to only be done once for any .NET Foundation OSS project.
+You will need to sign a [Contributor License Agreement](https://cla.dotnetfoundation.org/) when submitting your pull request. To complete the Contributor License Agreement (CLA), you will need to follow the instructions provided by the CLA bot when you send the pull request. This needs to only be done once for any .NET Foundation OSS project.
 
 Make sure you can build the code. Familiarize yourself with the project workflow and our coding conventions. If you don't know what a pull request is
 read this https://help.github.com/articles/using-pull-requests.

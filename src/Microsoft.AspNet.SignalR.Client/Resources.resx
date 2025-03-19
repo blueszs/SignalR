@@ -186,4 +186,19 @@
   <data name="Error_PossibleDeadlockDetected" xml:space="preserve">
     <value>Possible deadlock detected. A callback registered with "HubProxy.On" or "Connection.Received" has been executing for at least {0} seconds.</value>
   </data>
+  <data name="Error_NegotiationLimitExceeded" xml:space="preserve">
+    <value>Negotiate redirection limit exceeded.</value>
+  </data>
+  <data name="Error_ErrorFromServer" xml:space="preserve">
+    <value>Error message received from the server: '{0}'.</value>
+  </data>
+  <data name="Error_AspNetCoreServerDetected" xml:space="preserve">
+    <value>Detected a connection attempt to an ASP.NET Core SignalR Server. This client only supports connecting to an ASP.NET SignalR Server. See https://aka.ms/signalr-core-differences for details.</value>
+  </data>
+  <data name="Error_NoCompatibleTransportFound" xml:space="preserve">
+    <value>No client transport is compatible with the server. This either means that the AutoTransport was configured to use only WebSockets which is not compatible with the server or that the AutoTransport was configured with no sub-transports at all.</value>
+  </data>
+  <data name="Error_TransportDisconnectedBeforeConnectionFullyInitialized" xml:space="preserve">
+    <value>The transport disconnected before the connection could be fully initialized.</value>
+  </data>
 </root>

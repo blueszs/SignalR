@@ -1,7 +1,8 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
@@ -9,7 +10,6 @@ using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Client.Http;
 using Microsoft.AspNet.SignalR.Client.Infrastructure;
 using Newtonsoft.Json.Linq;
-using System.Collections.Generic;
 
 namespace Microsoft.AspNet.SignalR.Client.Transports
 {
@@ -77,7 +77,7 @@ namespace Microsoft.AspNet.SignalR.Client.Transports
 
         public Task<NegotiationResponse> Negotiate(IConnection connection, string connectionData)
         {
-            if(_finished)
+            if (_finished)
             {
                 throw new InvalidOperationException(Resources.Error_TransportCannotBeReused);
             }
@@ -101,20 +101,21 @@ namespace Microsoft.AspNet.SignalR.Client.Transports
         }
 
         protected abstract void OnStart(IConnection connection, string connectionData, CancellationToken disconnectToken);
-        
+
         protected abstract void OnStartFailed();
 
         // internal for testing
-        protected internal void TransportFailed(Exception ex)
+        protected internal bool TryFailStart(Exception ex)
         {
             // will be no-op if handler already finished (either succeeded or failed)
+            // will return true if start failed for any reason.
             if (ex == null)
             {
-                _initializationHandler.Fail();
+                return _initializationHandler.TryFailStart();
             }
             else
             {
-                _initializationHandler.Fail(ex);
+                return _initializationHandler.TryFailStart(ex);
             }
         }
 
@@ -163,6 +164,14 @@ namespace Microsoft.AspNet.SignalR.Client.Transports
                 if (result["I"] != null)
                 {
                     connection.OnReceived(result);
+                    return false;
+                }
+
+                if (result["E"] != null)
+                {
+                    // Global error. Raise the issue and disconnect.
+                    connection.OnError(new HubException(string.Format(Resources.Error_ErrorFromServer, result.Value<string>("E"))));
+                    connection.Disconnect();
                     return false;
                 }
 

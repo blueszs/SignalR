@@ -1,4 +1,4 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
@@ -14,7 +14,7 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
     internal class TransportInitializationHandler
     {
         private readonly ThreadSafeInvoker _initializationInvoker;
-        private readonly TaskCompletionSource<object> _initializationTask;
+        private readonly DispatchingTaskCompletionSource<object> _initializationTask;
         private readonly IConnection _connection;
         private readonly IHttpClient _httpClient;
         private readonly string _connectionData;
@@ -35,7 +35,7 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
                                               IConnection connection,
                                               string connectionData,
                                               string transport,
-                                              CancellationToken disconnectToken, 
+                                              CancellationToken disconnectToken,
                                               TransportHelper transportHelper)
         {
             if (connection == null)
@@ -49,16 +49,25 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
             _transport = transport;
             _transportHelper = transportHelper;
 
-            _initializationTask = new TaskCompletionSource<object>();
+            _initializationTask = new DispatchingTaskCompletionSource<object>();
             _initializationInvoker = new ThreadSafeInvoker();
 
             // Default event
             OnFailure = () => { };
 
             // We want to fail if the disconnect token is tripped while we're waiting on initialization
-            _tokenCleanup = disconnectToken.SafeRegister(
-                _ => Fail(new OperationCanceledException(Resources.Error_ConnectionCancelled, disconnectToken)),
-                state: null);
+            try
+            {
+                _tokenCleanup = disconnectToken.SafeRegister(
+                    _ => TryFailStart(new OperationCanceledException(Resources.Error_ConnectionCancelled, disconnectToken)),
+                    state: null);
+            }
+            catch (ObjectDisposedException)
+            {
+                // We only dispose this token after cancelling it, so consider this cancellation.
+                // The ODE is only thrown on .NET 4.5.2 and below (.NET 4.6 no longer throws ODE from CTS.Register)
+                TryFailStart(new OperationCanceledException(Resources.Error_ConnectionCancelled, disconnectToken));
+            }
 
             TaskAsyncHelper.Delay(connection.TotalTransportConnectTimeout)
                 .Then(() =>
@@ -67,7 +76,7 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
                     if (Interlocked.CompareExchange(ref _state, InitializationState.Failed, InitializationState.Initial) ==
                         InitializationState.Initial)
                     {
-                        Fail(new TimeoutException(Resources.Error_TransportTimedOutTryingToConnect));
+                        TryFailStart(new TimeoutException(Resources.Error_TransportTimedOutTryingToConnect));
                     }
                 });
         }
@@ -82,14 +91,17 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
             }
         }
 
-        public void Fail()
+        public bool TryFailStart()
         {
-            Fail(new InvalidOperationException(Resources.Error_TransportFailedToConnect));
+            return TryFailStart(new InvalidOperationException(Resources.Error_TransportFailedToConnect));
         }
 
-        public void Fail(Exception ex)
+        public bool TryFailStart(Exception ex)
         {
             _initializationInvoker.Invoke(CompleteFail, ex);
+            // Still return true if Start() failed due to an earlier call to TryFailStart() to prevent unwanted reconnects.
+            // If CompleteFail is called, the state transition will happen inline. The Failed state is terminal.
+            return _state == InitializationState.Failed;
         }
 
         public void InitReceived()
@@ -107,10 +119,10 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
                                     }
                                     else
                                     {
-                                        Fail(new StartException(Resources.Error_StartFailed));
+                                        TryFailStart(new StartException(Resources.Error_StartFailed));
                                     }
                                 })
-                                .Catch(ex => Fail(new StartException(Resources.Error_StartFailed, ex)), _connection);
+                                .Catch(ex => TryFailStart(new StartException(Resources.Error_StartFailed, ex)), _connection);
             }
         }
 
@@ -134,7 +146,7 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
                 {
                     ex = new StartException(Resources.Error_StartFailed, ex);
                 }
- 
+
                 _initializationTask.TrySetUnwrappedException(ex);
             });
 
@@ -146,10 +158,12 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
 
         private static void Dispatch(Action callback)
         {
-#if NETFX_CORE
+#if NET45 || NETSTANDARD1_3 || NETSTANDARD2_0
             Task.Run(() =>
-#else
+#elif NET40
             ThreadPool.QueueUserWorkItem(_ =>
+#else
+#error Unsupported framework.
 #endif
             callback());
         }

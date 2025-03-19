@@ -48,12 +48,14 @@ namespace Microsoft.AspNet.SignalR.Owin
     internal class OwinWebSocketHandler
     {
         private readonly Func<IWebSocket, Task> _callback;
+        private readonly Action<IWebSocket> _prepareWebSocket;
 
         private readonly int? _maxIncomingMessageSize;
 
-        public OwinWebSocketHandler(Func<IWebSocket, Task> callback, int? maxIncomingMessageSize)
+        public OwinWebSocketHandler(Func<IWebSocket, Task> callback, Action<IWebSocket> prepareWebsocket, int? maxIncomingMessageSize)
         {
             _callback = callback;
+            _prepareWebSocket = prepareWebsocket;
             _maxIncomingMessageSize = maxIncomingMessageSize;
         }
 
@@ -64,17 +66,22 @@ namespace Microsoft.AspNet.SignalR.Owin
             WebSocket webSocket;
 
             // Try to get the websocket context from the environment
-            if (!environment.TryGetValue(typeof(WebSocketContext).FullName, out value))
+            if (environment.TryGetValue(typeof(WebSocketContext).FullName, out value))
             {
-                webSocket = new OwinWebSocket(environment);
+                webSocket = ((WebSocketContext)value).WebSocket;
+            }
+            else if (environment.TryGetValue(typeof(WebSocket).FullName, out value))
+            {
+                webSocket = (WebSocket)value;
             }
             else
             {
-                webSocket = ((WebSocketContext)value).WebSocket;
+                webSocket = new OwinWebSocket(environment);
             }
 
             var cts = new CancellationTokenSource();
             var webSocketHandler = new DefaultWebSocketHandler(_maxIncomingMessageSize);
+            _prepareWebSocket(webSocketHandler);
             var task = webSocketHandler.ProcessWebSocketRequestAsync(webSocket, cts.Token);
 
             RunWebSocketHandler(webSocketHandler, cts);

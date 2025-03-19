@@ -1,12 +1,13 @@
 ﻿// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Infrastructure;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace Microsoft.AspNet.SignalR.Client.Hubs
 {
@@ -101,7 +102,7 @@ namespace Microsoft.AspNet.SignalR.Client.Hubs
                     : JValue.CreateNull();
             }
 
-            var tcs = new TaskCompletionSource<TResult>();
+            var tcs = new DispatchingTaskCompletionSource<TResult>();
             var callbackId = _connection.RegisterCallback(result =>
             {
                 if (result != null)
@@ -165,12 +166,20 @@ namespace Microsoft.AspNet.SignalR.Client.Hubs
                 CallbackId = callbackId
             };
 
-            if (_state.Count != 0)
+            string value = null;
+
+            lock (_state)
             {
-                hubData.State = _state;
+                if (_state.Count != 0)
+                {
+                    hubData.State = _state;
+
+                    // Only keep the _state lock during JsonSerializeObject if hubData.State is set to _state.
+                    value = _connection.JsonSerializeObject(hubData);
+                }
             }
 
-            var value = _connection.JsonSerializeObject(hubData);
+            value = value ?? _connection.JsonSerializeObject(hubData);
 
             _connection.Send(value).ContinueWith(task =>
             {

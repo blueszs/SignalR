@@ -1,13 +1,15 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Tracing;
 
 namespace Microsoft.AspNet.SignalR.Messaging
 {
@@ -17,6 +19,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
 
         private readonly IList<ScaleoutMappingStore> _streams;
         private readonly List<Cursor> _cursors;
+        private readonly TraceSource _trace;
 
         public ScaleoutSubscription(string identity,
                                     IList<string> eventKeys,
@@ -24,6 +27,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
                                     IList<ScaleoutMappingStore> streams,
                                     Func<MessageResult, object, Task<bool>> callback,
                                     int maxMessages,
+                                    ITraceManager traceManager,
                                     IPerformanceCounterManager counters,
                                     object state)
             : base(identity, eventKeys, callback, maxMessages, counters, state)
@@ -31,6 +35,11 @@ namespace Microsoft.AspNet.SignalR.Messaging
             if (streams == null)
             {
                 throw new ArgumentNullException("streams");
+            }
+
+            if (traceManager == null)
+            {
+                throw new ArgumentNullException(nameof(traceManager));
             }
 
             _streams = streams;
@@ -67,6 +76,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
             }
 
             _cursors = cursors;
+            _trace = traceManager["SignalR." + typeof(ScaleoutSubscription).Name];
         }
 
         public override void WriteCursor(TextWriter textWriter)
@@ -119,6 +129,9 @@ namespace Microsoft.AspNet.SignalR.Messaging
                 {
                     Cursor cursor = _cursors[i];
 
+                    _trace.TraceVerbose("Setting cursor {0} value {1} to {2} [{3}]",
+                        i, cursor.Id, nextCursor.Value, Identity);
+
                     cursor.Id = nextCursor.Value;
                 }
             }
@@ -127,6 +140,8 @@ namespace Microsoft.AspNet.SignalR.Messaging
         private IEnumerable<Tuple<ScaleoutMapping, int>> GetMappings()
         {
             var enumerators = new List<CachedStreamEnumerator>();
+
+            var singleStream = _streams.Count == 1;
 
             for (var streamIndex = 0; streamIndex < _streams.Count; ++streamIndex)
             {
@@ -142,6 +157,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
                 enumerators.Add(enumerator);
             }
 
+            var counter = 0;
             while (enumerators.Count > 0)
             {
                 ScaleoutMapping minMapping = null;
@@ -149,6 +165,8 @@ namespace Microsoft.AspNet.SignalR.Messaging
 
                 for (int i = enumerators.Count - 1; i >= 0; i--)
                 {
+                    counter += 1;
+
                     CachedStreamEnumerator enumerator = enumerators[i];
 
                     ScaleoutMapping mapping;
@@ -172,6 +190,8 @@ namespace Microsoft.AspNet.SignalR.Messaging
                     yield return Tuple.Create(minMapping, minEnumerator.StreamIndex);
                 }
             }
+
+            _trace.TraceEvent(TraceEventType.Verbose, 0, $"End of mappings (connection ID: {Identity}). Total mappings processed: {counter}");
         }
 
         private ulong ExtractMessages(int streamIndex, ScaleoutMapping mapping, IList<ArraySegment<Message>> items, ref int totalCount)
@@ -188,9 +208,11 @@ namespace Microsoft.AspNet.SignalR.Messaging
                     {
                         LocalEventKeyInfo info = mapping.LocalKeyInfo[j];
 
-                        if (info.MessageStore != null && info.Key.Equals(eventKey, StringComparison.OrdinalIgnoreCase))
+                        // Capture info.MessageStore because it could be GC'd while we're working with it.
+                        var messageStore = info.MessageStore;
+                        if (messageStore != null && info.Key.Equals(eventKey, StringComparison.OrdinalIgnoreCase))
                         {
-                            MessageStoreResult<Message> storeResult = info.MessageStore.GetMessages(info.Id, 1);
+                            MessageStoreResult<Message> storeResult = messageStore.GetMessages(info.Id, 1);
 
                             if (storeResult.Messages.Count > 0)
                             {
@@ -203,10 +225,14 @@ namespace Microsoft.AspNet.SignalR.Messaging
                                     items.Add(storeResult.Messages);
                                     totalCount += storeResult.Messages.Count;
 
+                                    _trace.TraceVerbose("Adding {0} message(s) for mapping id: {1}, event key: '{2}', event id: {3}, streamIndex: {4}",
+                                        storeResult.Messages.Count, mapping.Id, info.Key, info.Id, streamIndex);
+
                                     // We got a mapping id bigger than what we expected which
                                     // means we missed messages. Use the new mappingId.
                                     if (message.MappingId > mapping.Id)
                                     {
+                                        _trace.TraceEvent(TraceEventType.Verbose, 0, $"Extracted additional messages, updating cursor to new Mapping ID: {message.MappingId}");
                                         return message.MappingId;
                                     }
                                 }
@@ -215,6 +241,10 @@ namespace Microsoft.AspNet.SignalR.Messaging
                                     // REVIEW: When the stream indexes don't match should we leave the mapping id as is?
                                     // If we do nothing then we'll end up querying old cursor ids until
                                     // we eventually find a message id that matches this stream index.
+
+                                    _trace.TraceInformation(
+                                        "Stream index mismatch. Mapping id: {0}, event key: '{1}', event id: {2}, message.StreamIndex: {3}, streamIndex: {4}",
+                                            mapping.Id, info.Key, info.Id, message.StreamIndex, streamIndex);
                                 }
                             }
                         }

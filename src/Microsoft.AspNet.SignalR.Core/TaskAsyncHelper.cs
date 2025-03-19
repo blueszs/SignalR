@@ -1,20 +1,21 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
-using System.Collections;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
-using System.IO;
-using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
-#if !SERVER
+
+#if SERVER
+// Nothing to import.
+#elif CLIENT
 using Microsoft.AspNet.SignalR.Client;
+#else
+#error Included in unexpected project
 #endif
+
 using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR
@@ -161,7 +162,7 @@ namespace Microsoft.AspNet.SignalR
         [SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "This is a shared file")]
 #if SERVER
         private static void AttachFaultedContinuation<TTask>(TTask task, Action<AggregateException, object> handler, object state, TraceSource traceSource) where TTask : Task
-#else      
+#else
         private static void AttachFaultedContinuation<TTask>(TTask task, Action<AggregateException, object> handler, object state, IConnection connection) where TTask : Task
 #endif
         {
@@ -271,7 +272,7 @@ namespace Microsoft.AspNet.SignalR
         }
 
         [SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "This is a shared file")]
-        public static void ContinueWithNotComplete(this Task task, TaskCompletionSource<object> tcs)
+        public static void ContinueWithNotComplete(this Task task, DispatchingTaskCompletionSource<object> tcs)
         {
             task.ContinueWithPreservedCulture(t =>
             {
@@ -281,14 +282,14 @@ namespace Microsoft.AspNet.SignalR
                 }
                 else if (t.IsCanceled)
                 {
-                    tcs.SetCanceled();
+                    tcs.TrySetCanceled();
                 }
             },
             TaskContinuationOptions.NotOnRanToCompletion);
         }
 
         [SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "This is a shared file")]
-        public static Task ContinueWith(this Task task, TaskCompletionSource<object> tcs)
+        public static Task ContinueWith(this Task task, DispatchingTaskCompletionSource<object> tcs)
         {
             task.ContinueWithPreservedCulture(t =>
             {
@@ -704,11 +705,7 @@ namespace Microsoft.AspNet.SignalR
 #else
             var tcs = new TaskCompletionSource<object>();
 
-            var timer = new Timer(tcs.SetResult,
-            null,
-            timeOut,
-            TimeSpan.FromMilliseconds(-1));
-
+            var timer = new Timer((state) => ((TaskCompletionSource<object>)state).TrySetResult(null), tcs, timeOut, TimeSpan.FromMilliseconds(-1));
             return tcs.Task.ContinueWithPreservedCulture(_ =>
             {
                 timer.Dispose();
@@ -920,7 +917,7 @@ namespace Microsoft.AspNet.SignalR
         public static Task<T> FromResult<T>(T value)
         {
             var tcs = new TaskCompletionSource<T>();
-            tcs.SetResult(value);
+            tcs.TrySetResult(value);
             return tcs.Task;
         }
 
@@ -934,7 +931,7 @@ namespace Microsoft.AspNet.SignalR
         internal static Task<T> FromError<T>(Exception e)
         {
             var tcs = new TaskCompletionSource<T>();
-            tcs.SetUnwrappedException<T>(e);
+            tcs.TrySetUnwrappedException<T>(e);
             return tcs.Task;
         }
 
@@ -944,11 +941,11 @@ namespace Microsoft.AspNet.SignalR
             var aggregateException = e as AggregateException;
             if (aggregateException != null)
             {
-                tcs.SetException(aggregateException.InnerExceptions);
+                tcs.TrySetException(aggregateException.InnerExceptions);
             }
             else
             {
-                tcs.SetException(e);
+                tcs.TrySetException(e);
             }
         }
 
@@ -970,7 +967,7 @@ namespace Microsoft.AspNet.SignalR
         private static Task Canceled()
         {
             var tcs = new TaskCompletionSource<object>();
-            tcs.SetCanceled();
+            tcs.TrySetCanceled();
             return tcs.Task;
         }
 
@@ -978,12 +975,12 @@ namespace Microsoft.AspNet.SignalR
         private static Task<T> Canceled<T>()
         {
             var tcs = new TaskCompletionSource<T>();
-            tcs.SetCanceled();
+            tcs.TrySetCanceled();
             return tcs.Task;
         }
 
-
-#if !NETFX_CORE
+        // Not supported in .NET Standard 1.3, but also not used.
+#if !NETSTANDARD1_3
         internal struct CulturePair
         {
             public CultureInfo Culture;
@@ -1022,7 +1019,7 @@ namespace Microsoft.AspNet.SignalR
 
         internal static void RunWithPreservedCulture<T>(CulturePair preservedCulture, Action<T> action, T arg)
         {
-            RunWithPreservedCulture(preservedCulture, (f, state)  =>
+            RunWithPreservedCulture(preservedCulture, (f, state) =>
             {
                 f(state);
                 return (object)null;
@@ -1039,35 +1036,41 @@ namespace Microsoft.AspNet.SignalR
 
         internal static Task ContinueWithPreservedCulture(this Task task, Action<Task> continuationAction, TaskContinuationOptions continuationOptions)
         {
-#if NETFX_CORE
-            // The Thread class is not available on WinRT
+#if NETSTANDARD1_3
+            // The Thread class is not available on .NET Standard 1.3
             return task.ContinueWith(continuationAction, continuationOptions);
-#else
+#elif NETSTANDARD2_0 || NET40 || NET45 || NET461 || NET472
             var preservedCulture = SaveCulture();
             return task.ContinueWith(t => RunWithPreservedCulture(preservedCulture, continuationAction, t), continuationOptions);
+#else
+#error Unsupported framework.
 #endif
         }
 
         internal static Task ContinueWithPreservedCulture<T>(this Task<T> task, Action<Task<T>> continuationAction, TaskContinuationOptions continuationOptions)
         {
-#if NETFX_CORE
-            // The Thread class is not available on WinRT
+#if NETSTANDARD1_3
+            // The Thread class is not available on .NET Standard 1.3
             return task.ContinueWith(continuationAction, continuationOptions);
-#else
+#elif NETSTANDARD2_0 || NET40 || NET45 || NET461 || NET472
             var preservedCulture = SaveCulture();
             return task.ContinueWith(t => RunWithPreservedCulture(preservedCulture, continuationAction, t), continuationOptions);
+#else
+#error Unsupported framework.
 #endif
         }
 
         [SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "This is a shared file")]
         internal static Task<TResult> ContinueWithPreservedCulture<T, TResult>(this Task<T> task, Func<Task<T>, TResult> continuationAction, TaskContinuationOptions continuationOptions)
         {
-#if NETFX_CORE
-            // The Thread class is not available on WinRT
+#if NETSTANDARD1_3
+            // The Thread class is not available on .NET Standard 1.3
             return task.ContinueWith(continuationAction, continuationOptions);
-#else
+#elif NETSTANDARD2_0 || NET40 || NET45 || NET461 || NET472
             var preservedCulture = SaveCulture();
             return task.ContinueWith(t => RunWithPreservedCulture(preservedCulture, continuationAction, t), continuationOptions);
+#else
+#error Unsupported framework.
 #endif
         }
 
@@ -1099,14 +1102,14 @@ namespace Microsoft.AspNet.SignalR
                 }
                 else if (t.IsCanceled)
                 {
-                    tcs.SetCanceled();
+                    tcs.TrySetCanceled();
                 }
                 else
                 {
                     try
                     {
                         successor();
-                        tcs.SetResult(null);
+                        tcs.TrySetResult(null);
                     }
                     catch (Exception ex)
                     {
@@ -1143,12 +1146,12 @@ namespace Microsoft.AspNet.SignalR
                             next(state);
                         }
 
-                        tcs.SetCanceled();
+                        tcs.TrySetCanceled();
                     }
                     else
                     {
                         next(state);
-                        tcs.SetResult(null);
+                        tcs.TrySetResult(null);
                     }
                 }
                 catch (Exception ex)
@@ -1182,7 +1185,7 @@ namespace Microsoft.AspNet.SignalR
                         try
                         {
                             successor(t.Result);
-                            tcs.SetResult(null);
+                            tcs.TrySetResult(null);
                         }
                         catch (Exception ex)
                         {
@@ -1207,14 +1210,14 @@ namespace Microsoft.AspNet.SignalR
                     }
                     else if (task.IsCanceled)
                     {
-                        tcs.SetCanceled();
+                        tcs.TrySetCanceled();
                     }
                     else
                     {
                         try
                         {
                             successor(t);
-                            tcs.SetResult(null);
+                            tcs.TrySetResult(null);
                         }
                         catch (Exception ex)
                         {
@@ -1238,13 +1241,13 @@ namespace Microsoft.AspNet.SignalR
                     }
                     else if (t.IsCanceled)
                     {
-                        tcs.SetCanceled();
+                        tcs.TrySetCanceled();
                     }
                     else
                     {
                         try
                         {
-                            tcs.SetResult(successor());
+                            tcs.TrySetResult(successor());
                         }
                         catch (Exception ex)
                         {
@@ -1268,13 +1271,13 @@ namespace Microsoft.AspNet.SignalR
                     }
                     else if (task.IsCanceled)
                     {
-                        tcs.SetCanceled();
+                        tcs.TrySetCanceled();
                     }
                     else
                     {
                         try
                         {
-                            tcs.SetResult(successor(t));
+                            tcs.TrySetResult(successor(t));
                         }
                         catch (Exception ex)
                         {
@@ -1353,6 +1356,24 @@ namespace Microsoft.AspNet.SignalR
         private static class TaskCache<T>
         {
             public static Task<T> Empty = MakeTask<T>(default(T));
+        }
+
+        [SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "This is a shared file")]
+        public static void Dispatch(Action action)
+        {
+#if NET40
+            ThreadPool.UnsafeQueueUserWorkItem(_ =>
+            {
+                action();
+            }, state: null);
+#elif NET45 || NETSTANDARD1_3 || NETSTANDARD2_0 || NET461 || NET472 // Stress uses this component and builds on net461
+            Task.Run(() =>
+            {
+                action();
+            });
+#else
+#error Unsupported target framework.
+#endif
         }
     }
 }

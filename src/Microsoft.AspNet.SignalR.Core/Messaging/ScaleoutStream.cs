@@ -1,4 +1,4 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
@@ -7,6 +7,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Infrastructure;
+using System.Runtime.ExceptionServices;
 
 namespace Microsoft.AspNet.SignalR.Messaging
 {
@@ -16,7 +17,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
         private static Task _initializeDrainTask;
         private TaskQueue _queue;
         private StreamState _state;
-        private Exception _error;
+        private ExceptionDispatchInfo _error;
 
         private readonly int _size;
         private readonly QueuingBehavior _queueBehavior;
@@ -86,7 +87,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
             {
                 if (_error != null)
                 {
-                    throw _error;
+                    _error.Throw();
                 }
 
                 // If the queue is closed then stop sending
@@ -134,7 +135,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
 
                 Buffer();
 
-                _error = error;
+                _error = ExceptionDispatchInfo.Capture(error);
             }
         }
 
@@ -284,10 +285,10 @@ namespace Microsoft.AspNet.SignalR.Messaging
             }
 
             var tcs = new TaskCompletionSource<object>();
-            
+
             queue.Drain().Catch(traceSource).ContinueWith(task =>
             {
-                tcs.SetResult(null);
+                tcs.TrySetResult(null);
             });
 
             return tcs.Task;
@@ -304,12 +305,12 @@ namespace Microsoft.AspNet.SignalR.Messaging
             private readonly object _state;
 
             public readonly ScaleoutStream Stream;
-            public readonly TaskCompletionSource<object> TaskCompletionSource;
+            public readonly DispatchingTaskCompletionSource<object> TaskCompletionSource;
 
             public SendContext(ScaleoutStream stream, Func<object, Task> send, object state)
             {
                 Stream = stream;
-                TaskCompletionSource = new TaskCompletionSource<object>();
+                TaskCompletionSource = new DispatchingTaskCompletionSource<object>();
                 _send = send;
                 _state = state;
             }

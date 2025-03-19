@@ -87,6 +87,10 @@ namespace Microsoft.AspNet.SignalR.Transports
                 isNewConnection = false;
                 oldConnection = old.Connection;
 
+                // If the old connection was on a different transport, we need to transfer the count
+                old.Connection.DecrementConnectionsCount();
+                newMetadata.Connection.IncrementConnectionsCount();
+
                 return newMetadata;
             });
 
@@ -162,7 +166,7 @@ namespace Microsoft.AspNet.SignalR.Transports
 
         public IList<ITrackingConnection> GetConnections()
         {
-            return _connections.Values.Select(metadata => metadata.Connection).ToList();
+            return _connections.Select(p => p.Value.Connection).ToList();
         }
 
         [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "We're tracing exceptions and don't want to crash the process.")]

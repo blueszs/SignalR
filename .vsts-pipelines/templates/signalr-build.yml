@@ -1,0 +1,97 @@
+parameters:
+  pool: ''
+  beforeBuild: []
+  afterBuild: []
+  variables:
+
+jobs:
+- job: Windows
+  pool:
+    ${{ if eq(parameters.pool, 'public') }}:
+      name: NetCore-Svc-Public
+      demands: ImageOverride -equals windows.vs2019.amd64.open
+    ${{ if eq(parameters.pool, 'internal') }}:
+      name: NetCore1ESPool-Svc-Internal
+      # Visual Studio Enterprise - contains some stuff, like SQL Server and IIS Express, that we use for testing
+      image: windows.vs2019.amd64
+      os: windows
+  variables:
+    BuildConfiguration: Release
+    # Rely on task ci-official.yml injects, not auto-injected build step.
+    skipComponentGovernanceDetection: true
+    ${{ insert }}: ${{ parameters.variables }}
+  steps:
+  - checkout: self
+    clean: true
+
+  - task: NodeTool@0
+    displayName: Install Node.js
+    inputs:
+      versionSpec: 16.x
+  - powershell: |
+      ./tools/chrome/InstallGoogleChrome.ps1
+    displayName: Install Chrome
+
+  - ${{ parameters.beforeBuild }}
+
+  - script: .\build.cmd -ci /p:Configuration=$(BuildConfiguration) /bl:build.binlog
+    displayName: Run build.cmd
+
+  - powershell: Move-Item build.binlog artifacts/logs/
+    displayName: Move binary log into artifacts/logs/
+    condition: always()
+    continueOnError: true
+
+  - task: PublishTestResults@2
+    displayName: Publish test results
+    condition: always()
+    inputs:
+      testRunner: vstest
+      testResultsFiles: 'artifacts/logs/**/*.trx'
+
+  - ${{ if eq(parameters.pool, 'public') }}:
+    - task: PublishBuildArtifacts@1
+      displayName: Upload artifacts
+      condition: and(always(), eq(variables['system.pullrequest.isfork'], false))
+      inputs:
+        pathtoPublish: artifacts/$(BuildConfiguration)/
+        artifactName: artifacts-$(BuildConfiguration)
+        artifactType: Container
+
+    - task: PublishBuildArtifacts@1
+      displayName: Upload logs
+      condition: always()
+      inputs:
+        pathtoPublish: artifacts/logs/
+        artifactName: logs-$(BuildConfiguration)
+        artifactType: Container
+
+  - ${{ if eq(parameters.pool, 'internal') }}:
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: Upload artifacts
+      condition: and(always(), eq(variables['system.pullrequest.isfork'], false))
+      inputs:
+        path: artifacts/$(BuildConfiguration)/
+        artifactName: artifacts-$(BuildConfiguration)
+        artifactType: Container
+
+    - task: 1ES.PublishPipelineArtifact@1
+      displayName: Upload logs
+      condition: always()
+      inputs:
+        path: artifacts/logs/
+        artifactName: logs-$(BuildConfiguration)
+        artifactType: Container
+
+  - task: PublishTestResults@2
+    displayName: Publish js test results
+    condition: always()
+    inputs:
+      testResultsFormat: JUnit
+      testResultsFiles: '**/artifacts/log/**/*.xml'
+      testRunTitle: $(AgentOsName)-$(BuildConfiguration)-js
+      mergeTestResults: true
+      buildConfiguration: $(BuildConfiguration)
+      buildPlatform: $(AgentOsName)
+
+  - ${{ parameters.afterBuild }}
